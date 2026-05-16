@@ -94,27 +94,52 @@ const DOMAINS = [
                    'Assign a technology champion to evaluate emerging tools and report monthly']
     }
   },
-  {
-    key: 'Momentum',
-    label: 'Customer & Market Positioning',
-    questions: [17, 18, 19, 20],
-    weight: 0.15,
-    descriptors: {
-      critical:  'Market positioning is unclear — the organization lacks differentiation and customer retention is volatile.',
-      atRisk:    'Some market awareness exists but competitive positioning is reactive and customer feedback loops are weak.',
-      developing:'The organization understands its market position with emerging differentiation, but proactive market expansion is limited.',
-      strong:    'Strong market positioning with clear differentiation, solid customer retention, and active pursuit of growth opportunities.',
-      optimized: 'Market leadership with deep customer insight, strong brand differentiation, proactive expansion, and high retention rates.'
-    },
-    actions: {
-      critical:  ['Survey your top 10 customers this week — ask what they value most and what nearly made them leave',
-                   'Write a one-paragraph competitive differentiator and test it with 5 prospects'],
-      moderate:  ['Map your customer journey from first contact to repeat purchase — identify the 3 biggest friction points',
-                   'Analyze your top 3 competitors: pricing, positioning, and service gaps you can exploit'],
-      growth:    ['Develop a formal customer retention program with measurable NPS targets',
-                   'Create a market expansion playbook targeting one adjacent segment or geography']
-    }
+  // ✅ FIXED — matches Q17-Q20 actual content
+{
+  key: 'Momentum',
+  label: 'Leadership Momentum & Adaptability',
+  questions: [17, 18, 19, 20],
+  weight: 0.15,
+  descriptors: {
+    critical:  'Leadership lacks adaptability and accountability — the organization struggles to respond to challenges and rarely tracks progress on goals.',
+    atRisk:    'Leaders are inconsistent in modeling improvement behaviors. Goal tracking is sporadic and team motivation is uneven.',
+    developing:'Leadership shows emerging adaptability with some accountability structures in place, though consistency across the team remains a challenge.',
+    strong:    'Leaders actively model adaptability and accountability. Progress is tracked consistently and the team demonstrates meaningful alignment.',
+    optimized: 'Leadership sets the standard for continuous improvement — adaptability, accountability, and goal transparency are embedded in daily operations.'
+  },
+  actions: {
+    critical:  ['Hold an emergency leadership accountability session — define 3 specific, measurable commitments leaders will model this week',
+                'Implement a daily or weekly team progress check-in to establish rhythm and visibility around goals'],
+    moderate:  ['Create a simple leadership scorecard tracking adaptability, follow-through, and team alignment monthly',
+                'Assign one "momentum owner" per team to track and report weekly progress toward key outcomes'],
+    growth:    ['Implement a quarterly leadership retrospective — what worked, what slowed us down, what changes next quarter',
+                'Develop a team motivation and alignment dashboard visible to all staff, updated weekly']
   }
+  /*
+  SAVED FOR FUTURE DOMAIN — Customer & Market Positioning
+  Add this as a 6th DOMAIN entry (weight: 0.10–0.15) when Q21–Q24 are added to the form.
+
+  key: 'CustomerMarket',
+  label: 'Customer & Market Positioning',
+  questions: [21, 22, 23, 24],  // ← new questions to be added to form
+  weight: 0.15,
+  descriptors: {
+    critical:   'Market positioning is unclear — the organization lacks differentiation and customer retention is volatile.',
+    atRisk:     'Some market awareness exists but competitive positioning is reactive and customer feedback loops are weak.',
+    developing: 'The organization understands its market position with emerging differentiation, but proactive market expansion is limited.',
+    strong:     'Strong market positioning with clear differentiation, solid customer retention, and active pursuit of growth opportunities.',
+    optimized:  'Market leadership with deep customer insight, strong brand differentiation, proactive expansion, and high retention rates.'
+  },
+  actions: {
+    critical:  ['Survey your top 10 customers this week — ask what they value most and what nearly made them leave',
+                'Write a one-paragraph competitive differentiator and test it with 5 prospects'],
+    moderate:  ['Map your customer journey from first contact to repeat purchase — identify the 3 biggest friction points',
+                'Analyze your top 3 competitors: pricing, positioning, and service gaps you can exploit'],
+    growth:    ['Develop a formal customer retention program with measurable NPS targets',
+                'Create a market expansion playbook targeting one adjacent segment or geography']
+  }
+*/
+}
 ];
 
 // ─── SCORE TIERS ─────────────────────────────────────────────────────
