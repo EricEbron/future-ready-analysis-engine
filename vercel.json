@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/futureready-analyze.js": {
+      "maxDuration": 30
+    },
+    "api/generate-pdf.js": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  }
+}
