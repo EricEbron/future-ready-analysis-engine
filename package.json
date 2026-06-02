@@ -1,15 +1,14 @@
 {
   "name": "future-ready-analysis-engine",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Future-Ready Transformation Analysis Engine — SME Media Group, LLC",
   "main": "api/futureready-analyze.js",
   "engines": {
     "node": ">=18.x"
   },
   "dependencies": {
-  "@sparticuz/chromium": "119.0.2",
-  "puppeteer-core": "21.11.0"
-},
+    "pdfkit": "^0.15.0"
+  },
   "devDependencies": {},
   "scripts": {
     "test": "node tests/test-runner.js"
