@@ -27,6 +27,23 @@
 
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
+
+// --- Inside your handler function ---
+
+// These must be set BEFORE calling executablePath()
+chromium.setHeadlessMode = true;
+chromium.setGraphicsMode = false;
+
+let browser;
+const executablePath = await chromium.executablePath();
+console.log('[FRTS PDF] Chromium executablePath:', executablePath);
+
+browser = await puppeteer.launch({
+  args: chromium.args,
+  defaultViewport: chromium.defaultViewport,
+  executablePath,   // ← explicit path is critical; never let this be undefined
+  headless: chromium.headless,
+});
 const Handlebars = require('handlebars');
 
 // ─── CORS HEADERS ─────────────────────────────────────────────────────────
