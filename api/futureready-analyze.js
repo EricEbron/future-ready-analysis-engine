@@ -512,6 +512,7 @@ module.exports = async (req, res) => {
       ValidationWarnings: warnings.length > 0 ? warnings.join(' | ') : 'None',
 
       // Composite scores
+      Tier:                   getTier(frs).label,
       FutureReadyScore:       frs,
       IndustryStabilityScore: iss,
 
