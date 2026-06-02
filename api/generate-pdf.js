@@ -25,6 +25,7 @@
 
 'use strict';
 
+const { put } = require('@vercel/blob');
 const PDFDocument = require('pdfkit');
 
 // ─── BRAND COLORS ────────────────────────────────────────────────────────────
@@ -687,16 +688,28 @@ module.exports = async function handler(req, res) {
   // ── Build response ───────────────────────────────────────────────────────
   const pdfBuffer = Buffer.concat(chunks);
   const pdf_base64 = pdfBuffer.toString('base64');
+  // === VERCEL BLOB UPLOAD ===
+const respondentName = (body.respondent_name || 'Client').trim();
+const nameParts = respondentName.split(/\s+/);
+const firstName = nameParts[0] || 'Report';
+const lastName  = nameParts.slice(1).join('-') || 'Client';
+const dateStr   = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+const blobFilename = `FRTS-Report-${firstName}-${lastName}-${dateStr}.pdf`;
+
+const blob = await put(blobFilename, pdfBuffer, {
+  access: 'public',
+  contentType: 'application/pdf',
+});
+// ========================
   const safeName   = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
   const filename   = `FRTS-Report-${safeName}-${shortId}.pdf`;
 
   return res.status(200).json({
-    success:    true,
-    pdf_base64,
-    filename,
-    mime_type:  'application/pdf',
-    size_kb:    Math.round(pdfBuffer.length / 1024),
-    page_count: 5,
-    report_id:  shortId,
-  });
+  status:     'success',
+  blob_url:   blob.url,
+  filename:   blobFilename,
+  size_kb:    Math.round(pdfBuffer.length / 1024),
+  page_count: 5,
+  pdf_generated_at: new Date().toISOString(),
+});
 };
