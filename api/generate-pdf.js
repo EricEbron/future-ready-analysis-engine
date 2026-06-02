@@ -25,8 +25,8 @@
 
 'use strict';
 
-const { put } = require('@vercel/blob');
 const PDFDocument = require('pdfkit');
+const { put } = require('@vercel/blob');   // ← ADD THIS LINE
 
 // ─── BRAND COLORS ────────────────────────────────────────────────────────────
 const C = {
@@ -685,31 +685,39 @@ module.exports = async function handler(req, res) {
     doc.end();
   });
 
-  // ── Build response ───────────────────────────────────────────────────────
+    // ── Build response ───────────────────────────────────────────────────────
   const pdfBuffer = Buffer.concat(chunks);
-  const pdf_base64 = pdfBuffer.toString('base64');
-  // === VERCEL BLOB UPLOAD ===
-const respondentName = (body.respondent_name || 'Client').trim();
-const nameParts = respondentName.split(/\s+/);
-const firstName = nameParts[0] || 'Report';
-const lastName  = nameParts.slice(1).join('-') || 'Client';
-const dateStr   = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-const blobFilename = `FRTS-Report-${firstName}-${lastName}-${dateStr}.pdf`;
+  const safeName  = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
+  const filename  = `FRTS-Report-${safeName}-${shortId}.pdf`;
 
-const blob = await put(blobFilename, pdfBuffer, {
-  access: 'public',
-  contentType: 'application/pdf',
-});
-// ========================
-  const safeName   = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
-  const filename   = `FRTS-Report-${safeName}-${shortId}.pdf`;
+  // Upload to Vercel Blob Storage and return a public URL
+  let blobUrl;
+  try {
+    const blob = await put(
+      `reports/${filename}`,
+      pdfBuffer,
+      { contentType: 'application/pdf', access: 'public' }
+    );
+    blobUrl = blob.url;
+  } catch (blobErr) {
+    console.error('Blob upload failed:', blobErr);
+    return res.status(500).json({
+      success: false,
+      error: 'PDF generated but blob upload failed.',
+      detail: blobErr.message,
+    });
+  }
 
   return res.status(200).json({
-  status:     'success',
-  blob_url:   blob.url,
-  filename:   blobFilename,
-  size_kb:    Math.round(pdfBuffer.length / 1024),
-  page_count: 5,
-  pdf_generated_at: new Date().toISOString(),
-});
+    success:    true,
+    blob_url:   blobUrl,
+    filename,
+    mime_type:  'application/pdf',
+    size_kb:    Math.round(pdfBuffer.length / 1024),
+    page_count: 5,
+    report_id:  shortId,
+    company:    clientCompany,
+    email:      clientEmail,
+    name:       clientName,
+  });
 };
