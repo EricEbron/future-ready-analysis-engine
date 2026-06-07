@@ -207,10 +207,20 @@ function bullet(doc, text, x, y, width, color = C.navy) {
 // ─── MAIN HANDLER ────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   // OPTIONS preflight
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+  if (req.method === 'OPTIONS') 
+// ─── CORS (restricted to Zapier only — Bug #10 fix) ──────────────────────
+const ALLOWED_ORIGINS = [
+  'https://hooks.zapier.com',
+  'https://zapier.com'
+];
+
+// In the handler, replace the 3 setHeader lines with:
+const origin = req.headers['origin'] || '';
+const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+
     return res.status(200).end();
   }
 
@@ -689,6 +699,61 @@ module.exports = async function handler(req, res) {
   const pdfBuffer = Buffer.concat(chunks);
   const safeName  = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
   const filename  = `FRTS-Report-${safeName}-${shortId}.pdf`;
+
+// ─── GOOGLE DRIVE UPLOAD (optional, requires GOOGLE_SA_KEY env var) ──────
+let driveUrl = null;
+let driveFileId = null;
+
+if (process.env.GOOGLE_SA_KEY && process.env.GOOGLE_DRIVE_FOLDER_ID) {
+  try {
+    const { google } = require('googleapis');
+    const { Readable } = require('stream');
+
+    const credentials = JSON.parse(process.env.GOOGLE_SA_KEY);
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/drive.file']
+    });
+
+    const drive = google.drive({ version: 'v3', auth });
+    const stream = Readable.from(pdfBuffer);
+
+    const driveRes = await drive.files.create({
+      requestBody: {
+        name: filename,
+        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
+        mimeType: 'application/pdf'
+      },
+      media: { mimeType: 'application/pdf', body: stream }
+    });
+
+    driveFileId = driveRes.data.id;
+
+    // Make file readable by anyone with the link
+    await drive.permissions.create({
+      fileId: driveFileId,
+      requestBody: { role: 'reader', type: 'anyone' }
+    });
+
+    driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
+  } catch (driveErr) {
+    console.error('[FRTS PDF] Drive upload failed (non-fatal):', driveErr.message);
+  }
+}
+
+// Then in the return, add these fields:
+return res.status(200).json({
+  success: true,
+  pdf_base64,
+  drive_url: driveUrl,        // ← Zapier can use this for email link
+  drive_file_id: driveFileId,
+  filename,
+  size_kb: sizeKb,
+  page_count: 6,
+  duration_ms: Date.now() - startTime,
+  client: { name: clientName, company: clientCompany, email: body.email || '' },
+  score: { frs, iss, tier }
+});
 
   // Upload to Vercel Blob Storage and return a public URL
   let blobUrl;
