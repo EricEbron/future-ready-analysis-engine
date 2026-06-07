@@ -9,6 +9,7 @@
  "dependencies": {
   "pdfkit": "^0.15.0",
   "@vercel/blob": "^0.27.0"
+  "googleapis": "^144.0.0" 
 },
   "devDependencies": {},
   "scripts": {
