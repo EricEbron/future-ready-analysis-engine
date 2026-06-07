@@ -1,242 +1,855 @@
 // ═════════════════════════════════════════════════════════════════════
-// FUTURE-READY TRANSFORMATION SYSTEM — PDF GENERATOR v1.1.1
+// FUTURE-READY TRANSFORMATION SYSTEM — PDF GENERATOR v1.0.0
 // SME Media Group, LLC | Clarksville, TN
 // Endpoint: POST /api/generate-pdf
 //
-// Stack: pdfkit (pure Node.js — no Chromium, Vercel Hobby compatible)
-// Memory: <50MB | Cold start: ~300ms
+// Dependencies: @sparticuz/chromium, puppeteer-core, handlebars
+// Memory: 1024MB | maxDuration: 30s (see vercel.json)
 //
-// Input fields (from futureready-analyze.js response via Zapier):
-//   name, email, company, title, phone, industry
-//   FutureReadyScore, IndustryStabilityScore, Tier
-//   Domain_Leadership, Domain_OperationalStability,
-//   Domain_CognitiveDiversity, Domain_TechAI, Domain_Momentum
-//   Strength1, Strength2, Strength3
-//   Bottleneck1, Bottleneck2, Bottleneck3
-//   Narrative_ExecutiveSummary, Narrative_DomainBreakdown
-//   IndustryInsights, AIReadinessSummary
-//   Roadmap_Day1_3, Roadmap_Day4_5, Roadmap_Day6_7
-//   Facilitator_30DayPlan
-//   MomentumCommentary (optional)
+// Request body fields (from scoring engine response + Code by Zapier):
+//   Client: name, email, company, title, phone, industry
+//   Scores: FutureReadyScore, IndustryStabilityScore,
+//           Domain_Leadership, Domain_OperationalStability,
+//           Domain_WorkforceFinancial, Domain_TechAI, Domain_Momentum
+//   Narratives: Narrative_ExecutiveSummary, Narrative_DomainBreakdown,
+//               IndustryInsights, AIReadinessSummary
+//   Roadmap: Roadmap_Day1_3, Roadmap_Day4_5, Roadmap_Day6_7
+//   Plan: Facilitator_30DayPlan
+//   Tier: Tier (string: Critical / At Risk / Developing / Strong / Optimized)
+//   Strengths: Strength1, Strength2, Strength3
+//   Bottlenecks: Bottleneck1, Bottleneck2, Bottleneck3
+//   White-label: branding_logo_url, branding_accent_color,
+//                branding_company_name, branding_footer_text
 //
-// Output:
-//   { success: true, pdf_base64: "...", filename: "...", size_kb: N }
+// Response:
+//   { success: true, pdf_base64: "...", filename: "...", page_count: 6 }
 // ═════════════════════════════════════════════════════════════════════
 
-'use strict';
+const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer-core');
+const Handlebars = require('handlebars');
 
-const PDFDocument = require('pdfkit');
-const { put } = require('@vercel/blob');   // ← ADD THIS LINE
-
-// ─── BRAND COLORS ────────────────────────────────────────────────────────────
-const C = {
-  navy:    [30,  58,  95],   // #1E3A5F
-  gold:    [201, 168, 76],   // #C9A84C
-  green:   [5,   150, 105],  // #059669
-  blue:    [37,  99,  235],  // #2563EB
-  amber:   [217, 119, 6],    // #D97706
-  red:     [220, 38,  38],   // #DC2626
-  purple:  [124, 58,  237],  // #7C3AED
-  dark:    [30,  41,  59],   // #1E293B
-  muted:   [100, 116, 139],  // #64748B
-  light:   [248, 250, 252],  // #F8FAFC
-  border:  [226, 232, 240],  // #E2E8F0
-  white:   [255, 255, 255],
+// ─── CORS HEADERS ─────────────────────────────────────────────────────────
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': 'https://hooks.zapier.com',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, x-api-key',
+  'Access-Control-Max-Age': '86400'
 };
 
-// ─── TIER CONFIG ──────────────────────────────────────────────────────────────
+// ─── TIER COLORS ──────────────────────────────────────────────────────────
 const TIER_CONFIG = {
-  'Critical':   { color: C.red,    label: 'Critical'   },
-  'At Risk':    { color: C.amber,  label: 'At Risk'    },
-  'Developing': { color: C.blue,   label: 'Developing' },
-  'Strong':     { color: C.green,  label: 'Strong'     },
-  'Optimized':  { color: C.purple, label: 'Optimized'  },
+  'Critical':   { color: '#DC2626', bg: '#FEE2E2', icon: '⚠️' },
+  'At Risk':    { color: '#D97706', bg: '#FEF3C7', icon: '🔶' },
+  'Developing': { color: '#2563EB', bg: '#DBEAFE', icon: '📈' },
+  'Strong':     { color: '#059669', bg: '#D1FAE5', icon: '✅' },
+  'Optimized':  { color: '#7C3AED', bg: '#EDE9FE', icon: '🏆' }
 };
 
-// ─── DOMAIN CONFIG ────────────────────────────────────────────────────────────
-const DOMAINS = [
-  { key: 'Domain_Leadership',             label: 'Leadership Clarity & Alignment',  weight: '25%' },
-  { key: 'Domain_OperationalStability',   label: 'Operational Stability & Workflow', weight: '25%' },
-  { key: 'Domain_CognitiveDiversity',     label: 'Workforce & Financial Health',     weight: '20%' },
-  { key: 'Domain_TechAI',                 label: 'Technology & AI Integration',      weight: '15%' },
-  { key: 'Domain_Momentum',               label: 'Leadership Momentum & Adaptability',weight: '15%' },
-];
+// ─── HELPERS ─────────────────────────────────────────────────────────────
+Handlebars.registerHelper('domainBar', function(score) {
+  const pct = Math.min(100, Math.max(0, Number(score) || 0));
+  let color;
+  if (pct >= 75)      color = '#059669';
+  else if (pct >= 60) color = '#2563EB';
+  else if (pct >= 40) color = '#D97706';
+  else                color = '#DC2626';
+  return new Handlebars.SafeString(
+    `<div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color};"></div></div>`
+  );
+});
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-function clean(val, fallback = '') {
-  if (val === null || val === undefined) return fallback;
-  return String(val).trim();
-}
-
-function num(val, fallback = 0) {
-  const n = parseFloat(val);
-  return isNaN(n) ? fallback : n;
-}
-
-function domainColor(score) {
-  if (score >= 75) return C.green;
-  if (score >= 60) return C.blue;
-  if (score >= 40) return C.amber;
-  return C.red;
-}
-
-function tierFromScore(frs) {
-  if (frs >= 90) return 'Optimized';
-  if (frs >= 75) return 'Strong';
-  if (frs >= 60) return 'Developing';
-  if (frs >= 40) return 'At Risk';
-  return 'Critical';
-}
-
-// ─── PDF BUILDER HELPERS ──────────────────────────────────────────────────────
-function setFill(doc, rgb) { doc.fillColor(rgb); }
-function setStroke(doc, rgb) { doc.strokeColor(rgb); }
-
-function drawRect(doc, x, y, w, h, rgb, radius = 0) {
-  doc.roundedRect(x, y, w, h, radius).fill(rgb);
-}
-
-function drawText(doc, text, x, y, opts = {}) {
-  const { font = 'Helvetica', size = 10, color = C.dark, width, align = 'left', lineBreak = true } = opts;
-  doc.font(font).fontSize(size).fillColor(color);
-  if (width) {
-    doc.text(text, x, y, { width, align, lineBreak });
-  } else {
-    doc.text(text, x, y, { align, lineBreak });
-  }
-}
-
-function drawHR(doc, y, x1, x2, color = C.border, thickness = 0.5) {
-  doc.moveTo(x1, y).lineTo(x2, y).lineWidth(thickness).strokeColor(color).stroke();
-}
-
-// Wraps long text, returns new y position after block
-function drawWrapped(doc, text, x, y, width, opts = {}) {
-  const { font = 'Helvetica', size = 9.5, color = C.dark, maxLines } = opts;
-  if (!text) return y;
-  doc.font(font).fontSize(size).fillColor(color);
-  const lines = text.split('\n');
-  let rendered = 0;
-  for (const line of lines) {
-    if (maxLines && rendered >= maxLines) { doc.text('…', x, y, { lineBreak: false }); break; }
-    const h = doc.heightOfString(line || ' ', { width });
-    doc.text(line || ' ', x, y, { width, lineBreak: false });
-    y += h + 2;
-    rendered++;
-  }
-  return y + 4;
-}
-
-// Section header banner
-function sectionBanner(doc, x, y, w, label, title, pageNum) {
-  drawRect(doc, x, y, w, 38, C.navy, 4);
-  // Gold accent left bar
-  drawRect(doc, x, y, 4, 38, C.gold, 2);
-  doc.font('Helvetica').fontSize(7.5).fillColor(C.gold)
-     .text(label.toUpperCase(), x + 12, y + 7, { lineBreak: false });
-  doc.font('Helvetica-Bold').fontSize(14).fillColor(C.white)
-     .text(title, x + 12, y + 17, { lineBreak: false });
-  doc.font('Helvetica').fontSize(8).fillColor([180, 200, 220])
-     .text(`Page ${pageNum} of 5`, x + w - 60, y + 15, { lineBreak: false });
-  return y + 52;
-}
-
-// Domain progress bar row
-function domainBar(doc, x, y, label, score, weight, barWidth) {
-  const pct = Math.min(Math.max(num(score), 0), 100) / 100;
-  const color = domainColor(num(score));
-  const BAR_H = 10;
-  const LABEL_W = 195;
-  const SCORE_W = 36;
-
-  // Label
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(C.dark)
-     .text(label, x, y, { width: LABEL_W, lineBreak: false });
-  // Weight
-  doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-     .text(`(${weight})`, x + LABEL_W, y, { lineBreak: false });
-  y += 14;
-
-  // Track
-  doc.roundedRect(x, y, barWidth, BAR_H, 3).fill(C.border);
-  // Fill
-  if (pct > 0) {
-    doc.roundedRect(x, y, barWidth * pct, BAR_H, 3).fill(color);
-  }
-  // Score label
-  doc.font('Helvetica-Bold').fontSize(9).fillColor(color)
-     .text(`${num(score)}`, x + barWidth + 6, y + 1, { lineBreak: false });
-
-  return y + BAR_H + 14;
-}
-
-// Score circle (SVG-style using pdfkit primitives)
-function scoreCircle(doc, cx, cy, score, radius = 48) {
-  const frs = num(score);
-  const tier = tierFromScore(frs);
+Handlebars.registerHelper('tierBadge', function(tier) {
   const cfg = TIER_CONFIG[tier] || TIER_CONFIG['Developing'];
+  return new Handlebars.SafeString(
+    `<span class="tier-badge" style="background:${cfg.bg};color:${cfg.color};border:2px solid ${cfg.color};">
+      ${cfg.icon} ${tier}
+    </span>`
+  );
+});
 
-  // Outer ring
-  doc.circle(cx, cy, radius).lineWidth(8).strokeColor(C.border).stroke();
-  // Filled arc approximation — pdfkit doesn't do arcs natively, use colored circle with smaller white circle
-  const pct = frs / 100;
-  doc.circle(cx, cy, radius).lineWidth(8).strokeColor(cfg.color).stroke();
-  // Score number
-  doc.font('Helvetica-Bold').fontSize(28).fillColor(cfg.color)
-     .text(String(frs), cx - radius, cy - 18, { width: radius * 2, align: 'center', lineBreak: false });
-  doc.font('Helvetica').fontSize(9).fillColor(C.muted)
-     .text('out of 100', cx - radius, cy + 12, { width: radius * 2, align: 'center', lineBreak: false });
-}
+Handlebars.registerHelper('scoreCircle', function(score, accentColor) {
+  const frs = Number(score) || 0;
+  const accent = accentColor || '#1E3A5F';
+  const circumference = 2 * Math.PI * 54;
+  const offset = circumference - (frs / 100) * circumference;
+  return new Handlebars.SafeString(`
+    <svg width="140" height="140" viewBox="0 0 140 140">
+      <circle cx="70" cy="70" r="54" fill="none" stroke="#E5E7EB" stroke-width="12"/>
+      <circle cx="70" cy="70" r="54" fill="none" stroke="${accent}" stroke-width="12"
+        stroke-dasharray="${circumference.toFixed(1)}"
+        stroke-dashoffset="${offset.toFixed(1)}"
+        stroke-linecap="round"
+        transform="rotate(-90 70 70)"/>
+      <text x="70" y="64" text-anchor="middle" font-size="32" font-weight="700" fill="${accent}">${frs}</text>
+      <text x="70" y="82" text-anchor="middle" font-size="11" fill="#6B7280">out of 100</text>
+    </svg>
+  `);
+});
 
-// Colored tag/pill
-function pill(doc, text, x, y, color, textColor = C.white) {
-  const w = doc.font('Helvetica-Bold').fontSize(9).widthOfString(text) + 20;
-  doc.roundedRect(x, y, w, 18, 9).fill(color);
-  doc.fillColor(textColor).text(text, x + 10, y + 4, { lineBreak: false });
-  return x + w + 8;
-}
+Handlebars.registerHelper('nl2br', function(text) {
+  if (!text) return '';
+  return new Handlebars.SafeString(
+    String(text).replace(/\n/g, '<br>')
+  );
+});
 
-// Bullet point
-function bullet(doc, text, x, y, width, color = C.navy) {
-  doc.circle(x + 3, y + 5, 2.5).fill(color);
-  doc.font('Helvetica').fontSize(9.5).fillColor(C.dark)
-     .text(text, x + 12, y, { width: width - 12, lineBreak: true });
-  return y + doc.heightOfString(text, { width: width - 12 }) + 6;
-}
+Handlebars.registerHelper('formatDate', function() {
+  const now = new Date();
+  return now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+});
 
-// ─── MAIN HANDLER ────────────────────────────────────────────────────────────
-module.exports = async function handler(req, res) {
-  // OPTIONS preflight
-  if (req.method === 'OPTIONS') 
-// ─── CORS (restricted to Zapier only — Bug #10 fix) ──────────────────────
-const ALLOWED_ORIGINS = [
-  'https://hooks.zapier.com',
-  'https://zapier.com'
-];
+Handlebars.registerHelper('currentYear', function() {
+  return new Date().getFullYear();
+});
 
-// In the handler, replace the 3 setHeader lines with:
-const origin = req.headers['origin'] || '';
-const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
+// ─── HTML TEMPLATE ────────────────────────────────────────────────────────
+const HTML_TEMPLATE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Future-Ready Assessment — {{clientName}}</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    return res.status(200).end();
+  :root {
+    --accent:  {{accentColor}};
+    --gold:    #C9A84C;
+    --navy:    #1E3A5F;
+    --light:   #F8FAFC;
+    --border:  #E2E8F0;
+    --text:    #1E293B;
+    --muted:   #64748B;
+    --white:   #FFFFFF;
+    --page-w:  794px;
+    --page-h:  1123px;
   }
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  body {
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text);
+    background: #CCCCCC;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 
+  /* PAGE STRUCTURE */
+  .page {
+    width: var(--page-w);
+    min-height: var(--page-h);
+    background: var(--white);
+    margin: 0 auto 24px;
+    position: relative;
+    overflow: hidden;
+    page-break-after: always;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .page-inner {
+    padding: 48px 52px 40px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── COVER PAGE ───────────────────────────────────────────────── */
+  .cover {
+    background: linear-gradient(160deg, var(--accent) 0%, #0F2647 100%);
+    color: white;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: var(--page-h);
+  }
+
+  .cover-header {
+    padding: 44px 52px 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+
+  .cover-logo-area { display: flex; flex-direction: column; gap: 6px; }
+  .cover-brand-name { font-size: 14px; font-weight: 700; color: var(--gold); letter-spacing: 1px; text-transform: uppercase; }
+  .cover-tagline { font-size: 10px; color: rgba(255,255,255,0.7); letter-spacing: 0.5px; }
+
+  .cover-logo-img { height: 48px; object-fit: contain; }
+
+  .cover-main {
+    padding: 0 52px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 28px;
+  }
+
+  .cover-eyebrow { font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--gold); font-weight: 600; }
+  .cover-title { font-size: 38px; font-weight: 800; line-height: 1.1; color: white; max-width: 560px; }
+  .cover-subtitle { font-size: 15px; color: rgba(255,255,255,0.85); font-weight: 400; }
+
+  .cover-score-block {
+    display: flex;
+    align-items: center;
+    gap: 36px;
+    background: rgba(255,255,255,0.1);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 16px;
+    padding: 24px 32px;
+    backdrop-filter: blur(4px);
+  }
+
+  .cover-score-label { font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: rgba(255,255,255,0.7); margin-bottom: 4px; }
+  .cover-score-num { font-size: 64px; font-weight: 800; color: white; line-height: 1; }
+  .cover-score-denom { font-size: 20px; color: rgba(255,255,255,0.6); }
+
+  .cover-tier-box {
+    padding: 10px 20px;
+    border-radius: 30px;
+    font-size: 14px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border: 2px solid;
+  }
+
+  .cover-domains {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .cover-domain-chip {
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 10px;
+    color: rgba(255,255,255,0.9);
+    white-space: nowrap;
+  }
+
+  .cover-domain-chip strong { color: var(--gold); }
+
+  .cover-footer {
+    padding: 24px 52px;
+    border-top: 1px solid rgba(255,255,255,0.15);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .cover-footer-left { font-size: 10px; color: rgba(255,255,255,0.6); }
+  .cover-footer-left strong { color: rgba(255,255,255,0.9); }
+  .cover-confidential {
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.5);
+    border: 1px solid rgba(255,255,255,0.2);
+    padding: 4px 10px;
+    border-radius: 4px;
+  }
+
+  /* ── SECTION PAGES ────────────────────────────────────────────── */
+  .page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 16px;
+    border-bottom: 3px solid var(--accent);
+    margin-bottom: 28px;
+  }
+
+  .page-header-left { display: flex; flex-direction: column; gap: 2px; }
+  .section-label { font-size: 9px; letter-spacing: 2.5px; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .section-title { font-size: 22px; font-weight: 800; color: var(--accent); }
+  .client-pill {
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--light);
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .page-footer {
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9px;
+    color: var(--muted);
+  }
+
+  /* ── SCORE WIDGETS ────────────────────────────────────────────── */
+  .score-row {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 28px;
+    align-items: flex-start;
+  }
+
+  .score-widget {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    background: var(--light);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 28px;
+    min-width: 160px;
+  }
+
+  .score-widget-label { font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+
+  .tier-badge {
+    display: inline-block;
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  /* ── DOMAIN BARS ──────────────────────────────────────────────── */
+  .domain-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .domain-label {
+    width: 220px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+
+  .bar-track {
+    flex: 1;
+    height: 14px;
+    background: #E2E8F0;
+    border-radius: 7px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 7px;
+    transition: width 0s;
+  }
+
+  .domain-score {
+    width: 36px;
+    text-align: right;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+
+  /* ── NARRATIVE TEXT ───────────────────────────────────────────── */
+  .narrative {
+    font-size: 10.5px;
+    line-height: 1.75;
+    color: var(--text);
+    margin-bottom: 18px;
+  }
+
+  .narrative p { margin-bottom: 10px; }
+
+  /* ── INFO BOXES ───────────────────────────────────────────────── */
+  .info-box {
+    background: var(--light);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    font-size: 10.5px;
+    line-height: 1.65;
+  }
+
+  .info-box-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+
+  /* ── STRENGTH / BOTTLENECK TAGS ───────────────────────────────── */
+  .tag-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .tag {
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 10px;
+    font-weight: 600;
+    border: 1.5px solid;
+  }
+
+  .tag-green { background: #D1FAE5; color: #065F46; border-color: #6EE7B7; }
+  .tag-red   { background: #FEE2E2; color: #991B1B; border-color: #FCA5A5; }
+
+  /* ── ROADMAP CARDS ────────────────────────────────────────────── */
+  .roadmap-grid { display: flex; gap: 16px; margin-bottom: 20px; }
+  .roadmap-card {
+    flex: 1;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .roadmap-card-header {
+    background: var(--accent);
+    color: white;
+    padding: 10px 14px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .roadmap-card-body {
+    padding: 14px;
+    font-size: 10px;
+    line-height: 1.7;
+    color: var(--text);
+    background: var(--light);
+  }
+
+  /* ── 30-DAY PLAN ──────────────────────────────────────────────── */
+  .plan-week {
+    margin-bottom: 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .plan-week-header {
+    background: var(--accent);
+    color: white;
+    padding: 8px 14px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .plan-week-body {
+    padding: 12px 14px;
+    font-size: 10.5px;
+    line-height: 1.65;
+    background: var(--light);
+  }
+
+  /* ── CTA BLOCK ────────────────────────────────────────────────── */
+  .cta-block {
+    background: linear-gradient(135deg, var(--accent), #0F2647);
+    border-radius: 12px;
+    padding: 28px 36px;
+    color: white;
+    text-align: center;
+    margin-top: 20px;
+  }
+
+  .cta-block h3 { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
+  .cta-block p { font-size: 11px; color: rgba(255,255,255,0.85); margin-bottom: 16px; line-height: 1.6; }
+  .cta-steps { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .cta-step {
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 10px;
+    font-weight: 600;
+    text-align: center;
+    min-width: 140px;
+  }
+  .cta-step-num { font-size: 20px; font-weight: 800; color: var(--gold); display: block; margin-bottom: 4px; }
+  .cta-contact { font-size: 12px; font-weight: 700; color: var(--gold); }
+
+  /* ── UTILITY ──────────────────────────────────────────────────── */
+  .two-col { display: flex; gap: 24px; }
+  .two-col > * { flex: 1; }
+  .mb-8 { margin-bottom: 8px; }
+  .mb-16 { margin-bottom: 16px; }
+  .mb-24 { margin-bottom: 24px; }
+  .text-muted { color: var(--muted); }
+  .text-accent { color: var(--accent); }
+  .font-bold { font-weight: 700; }
+  .gold-line { height: 3px; background: var(--gold); width: 48px; border-radius: 2px; margin: 8px 0 16px; }
+
+  @media print {
+    body { background: white; }
+    .page { margin: 0; page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 1: COVER                                                  -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page cover">
+  <div class="cover-header">
+    <div class="cover-logo-area">
+      {{#if logoUrl}}
+        <img src="{{logoUrl}}" class="cover-logo-img" alt="Logo">
+      {{else}}
+        <div class="cover-brand-name">{{brandCompany}}</div>
+        <div class="cover-tagline">Future-Ready Transformation System</div>
+      {{/if}}
+    </div>
+    <div class="cover-confidential">Confidential Assessment</div>
+  </div>
+
+  <div class="cover-main">
+    <div>
+      <div class="cover-eyebrow">Future-Ready Workplace Assessment</div>
+      <h1 class="cover-title">{{clientName}}</h1>
+      <div class="cover-subtitle">{{clientCompany}} &nbsp;·&nbsp; {{clientTitle}}</div>
+    </div>
+
+    <div class="cover-score-block">
+      <div>
+        <div class="cover-score-label">Future-Ready Score</div>
+        <div>
+          <span class="cover-score-num">{{frs}}</span>
+          <span class="cover-score-denom">/100</span>
+        </div>
+      </div>
+      <div style="border-left:1px solid rgba(255,255,255,0.25);padding-left:36px;">
+        <div class="cover-score-label">Performance Tier</div>
+        <div class="cover-tier-box" style="color:{{tierColor}};border-color:{{tierColor}};background:rgba(255,255,255,0.12);">
+          {{tier}}
+        </div>
+      </div>
+      <div style="border-left:1px solid rgba(255,255,255,0.25);padding-left:36px;">
+        <div class="cover-score-label">Stability Score</div>
+        <div style="font-size:36px;font-weight:800;color:white;line-height:1;">{{iss}}</div>
+      </div>
+    </div>
+
+    <div class="cover-domains">
+      <div class="cover-domain-chip">Leadership <strong>{{domLeadership}}</strong></div>
+      <div class="cover-domain-chip">Operations <strong>{{domOperations}}</strong></div>
+      <div class="cover-domain-chip">Workforce <strong>{{domWorkforce}}</strong></div>
+      <div class="cover-domain-chip">Technology <strong>{{domTech}}</strong></div>
+      <div class="cover-domain-chip">Momentum <strong>{{domMomentum}}</strong></div>
+    </div>
+  </div>
+
+  <div class="cover-footer">
+    <div class="cover-footer-left">
+      <strong>Industry:</strong> {{industry}} &nbsp;·&nbsp;
+      <strong>Prepared:</strong> {{formatDate}} &nbsp;·&nbsp;
+      <strong>Report ID:</strong> FRTS-{{submissionId}}
+    </div>
+    <div class="cover-footer-left" style="text-align:right;">
+      Prepared by {{brandCompany}}<br>
+      {{brandFooter}}
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 2: EXECUTIVE SUMMARY                                      -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-inner">
+    <div class="page-header">
+      <div class="page-header-left">
+        <div class="section-label">Section 01</div>
+        <div class="section-title">Executive Summary</div>
+      </div>
+      <div class="client-pill">{{clientName}} · {{clientCompany}}</div>
+    </div>
+
+    <!-- Score widgets row -->
+    <div class="score-row">
+      <div class="score-widget">
+        <div class="score-widget-label">Future-Ready Score</div>
+        {{{scoreCircle frs accentColor}}}
+        {{{tierBadge tier}}}
+      </div>
+
+      <div style="flex:1;display:flex;flex-direction:column;gap:12px;">
+        <!-- Domain summary bars -->
+        <div style="background:var(--light);border:1px solid var(--border);border-radius:12px;padding:18px 20px;">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:14px;">Domain Scores at a Glance</div>
+          <div class="domain-row">
+            <div class="domain-label">Leadership Clarity</div>
+            {{{domainBar domLeadership}}}
+            <div class="domain-score">{{domLeadership}}</div>
+          </div>
+          <div class="domain-row">
+            <div class="domain-label">Operational Stability</div>
+            {{{domainBar domOperations}}}
+            <div class="domain-score">{{domOperations}}</div>
+          </div>
+          <div class="domain-row">
+            <div class="domain-label">Workforce & Financial Health</div>
+            {{{domainBar domWorkforce}}}
+            <div class="domain-score">{{domWorkforce}}</div>
+          </div>
+          <div class="domain-row">
+            <div class="domain-label">Technology & AI Integration</div>
+            {{{domainBar domTech}}}
+            <div class="domain-score">{{domTech}}</div>
+          </div>
+          <div class="domain-row" style="margin-bottom:0;">
+            <div class="domain-label">Leadership Momentum</div>
+            {{{domainBar domMomentum}}}
+            <div class="domain-score">{{domMomentum}}</div>
+          </div>
+        </div>
+
+        <!-- ISS widget -->
+        <div style="background:var(--light);border:1px solid var(--border);border-radius:12px;padding:14px 20px;display:flex;align-items:center;gap:16px;">
+          <div style="font-size:34px;font-weight:800;color:var(--accent);">{{iss}}</div>
+          <div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);">Industry Stability Score</div>
+            <div style="font-size:10px;color:var(--muted);">Measures domain consistency · 100 = perfectly balanced organization</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strengths & Bottlenecks -->
+    <div style="margin-bottom:18px;">
+      <div style="font-size:11px;font-weight:700;margin-bottom:8px;color:var(--text);">Top Strengths</div>
+      <div class="tag-row">
+        <span class="tag tag-green">✓ {{strength1}}</span>
+        {{#if strength2}}<span class="tag tag-green">✓ {{strength2}}</span>{{/if}}
+        {{#if strength3}}<span class="tag tag-green">✓ {{strength3}}</span>{{/if}}
+      </div>
+      <div style="font-size:11px;font-weight:700;margin-bottom:8px;color:var(--text);">Priority Bottlenecks</div>
+      <div class="tag-row">
+        <span class="tag tag-red">⚠ {{bottleneck1}}</span>
+        {{#if bottleneck2}}<span class="tag tag-red">⚠ {{bottleneck2}}</span>{{/if}}
+        {{#if bottleneck3}}<span class="tag tag-red">⚠ {{bottleneck3}}</span>{{/if}}
+      </div>
+    </div>
+
+    <!-- Executive narrative -->
+    <div class="info-box">
+      <div class="info-box-title">Executive Assessment</div>
+      <div style="font-size:10.5px;line-height:1.75;">{{{nl2br executiveSummary}}}</div>
+    </div>
+
+    <div class="page-footer">
+      <span>Future-Ready Transformation System · {{brandCompany}}</span>
+      <span>Page 2 of 6 · {{formatDate}}</span>
+      <span>{{clientName}} · FRTS-{{submissionId}}</span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 3: DOMAIN DEEP DIVE                                       -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-inner">
+    <div class="page-header">
+      <div class="page-header-left">
+        <div class="section-label">Section 02</div>
+        <div class="section-title">Domain Analysis</div>
+      </div>
+      <div class="client-pill">{{clientName}} · {{clientCompany}}</div>
+    </div>
+
+    <div class="info-box" style="margin-bottom:24px;">
+      <div class="info-box-title">How to Read This Section</div>
+      Each of the five domains reflects 4 assessment questions. Domain scores are weighted in the Final Future-Ready Score:
+      Leadership (25%) · Operations (25%) · Workforce & Financial (20%) · Technology & AI (15%) · Leadership Momentum (15%).
+      A score under 60 requires targeted intervention. A score under 40 requires immediate action.
+    </div>
+
+    <div style="font-size:10.5px;line-height:1.75;">{{{nl2br domainBreakdown}}}</div>
+
+    <div class="page-footer">
+      <span>Future-Ready Transformation System · {{brandCompany}}</span>
+      <span>Page 3 of 6 · {{formatDate}}</span>
+      <span>{{clientName}} · FRTS-{{submissionId}}</span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 4: INDUSTRY INSIGHTS + AI READINESS                      -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-inner">
+    <div class="page-header">
+      <div class="page-header-left">
+        <div class="section-label">Section 03</div>
+        <div class="section-title">Industry & AI Readiness</div>
+      </div>
+      <div class="client-pill">{{clientName}} · {{clientCompany}}</div>
+    </div>
+
+    <div class="two-col" style="margin-bottom:20px;">
+      <div>
+        <div style="font-size:13px;font-weight:800;color:var(--accent);margin-bottom:6px;">Industry Context</div>
+        <div class="gold-line"></div>
+        <div style="font-size:10.5px;line-height:1.75;">{{{nl2br industryInsights}}}</div>
+      </div>
+      <div>
+        <div style="font-size:13px;font-weight:800;color:var(--accent);margin-bottom:6px;">AI Readiness Profile</div>
+        <div class="gold-line"></div>
+        <div style="font-size:10.5px;line-height:1.75;">{{{nl2br aiReadiness}}}</div>
+      </div>
+    </div>
+
+    <div class="page-footer">
+      <span>Future-Ready Transformation System · {{brandCompany}}</span>
+      <span>Page 4 of 6 · {{formatDate}}</span>
+      <span>{{clientName}} · FRTS-{{submissionId}}</span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 5: 7-DAY FIX-FIRST ROADMAP                               -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-inner">
+    <div class="page-header">
+      <div class="page-header-left">
+        <div class="section-label">Section 04</div>
+        <div class="section-title">7-Day Fix-First Roadmap</div>
+      </div>
+      <div class="client-pill">{{clientName}} · {{clientCompany}}</div>
+    </div>
+
+    <div class="info-box" style="margin-bottom:20px;">
+      <div class="info-box-title">How to Use This Roadmap</div>
+      These actions are sequenced by impact and urgency. Days 1-3 address the most critical domain.
+      Days 4-5 tackle the second priority. Days 6-7 lock in progress and set up your 30-Day Strategic Roadmap.
+      Assign an owner to each action <em>today</em>.
+    </div>
+
+    <div class="roadmap-grid">
+      <div class="roadmap-card">
+        <div class="roadmap-card-header">📍 Days 1–3 · Critical Priority</div>
+        <div class="roadmap-card-body">{{{nl2br roadmapDay1_3}}}</div>
+      </div>
+      <div class="roadmap-card">
+        <div class="roadmap-card-header">📋 Days 4–5 · Structural Improvement</div>
+        <div class="roadmap-card-body">{{{nl2br roadmapDay4_5}}}</div>
+      </div>
+    </div>
+
+    <div class="roadmap-card" style="margin-bottom:0;">
+      <div class="roadmap-card-header">🔒 Days 6–7 · Measure, Lock In & Plan Forward</div>
+      <div class="roadmap-card-body">{{{nl2br roadmapDay6_7}}}</div>
+    </div>
+
+    <div class="page-footer">
+      <span>Future-Ready Transformation System · {{brandCompany}}</span>
+      <span>Page 5 of 6 · {{formatDate}}</span>
+      <span>{{clientName}} · FRTS-{{submissionId}}</span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PAGE 6: 30-DAY PLAN + NEXT STEPS                              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="page">
+  <div class="page-inner">
+    <div class="page-header">
+      <div class="page-header-left">
+        <div class="section-label">Section 05</div>
+        <div class="section-title">30-Day Strategic Roadmap & Next Steps</div>
+      </div>
+      <div class="client-pill">{{clientName}} · {{clientCompany}}</div>
+    </div>
+
+    <div style="margin-bottom:20px;">
+      <div style="font-size:10.5px;line-height:1.75;margin-bottom:16px;">{{{nl2br thirtyDayPlan}}}</div>
+    </div>
+
+    <div class="cta-block">
+      <h3>Your Transformation Starts Now</h3>
+      <p>
+        You've taken the first step by completing this assessment. The data is clear — here's what happens next.
+        Each step below is designed to accelerate your progress from insight to measurable results.
+      </p>
+      <div class="cta-steps">
+        <div class="cta-step">
+          <span class="cta-step-num">1</span>
+          Book Your Strategy Debrief
+        </div>
+        <div class="cta-step">
+          <span class="cta-step-num">2</span>
+          Execute Your 7-Day Roadmap
+        </div>
+        <div class="cta-step">
+          <span class="cta-step-num">3</span>
+          Launch the 30-Day Plan
+        </div>
+        <div class="cta-step">
+          <span class="cta-step-num">4</span>
+          90-Day Re-Assessment
+        </div>
+      </div>
+      <div class="cta-contact">{{brandCompany}} · {{brandFooter}}</div>
+    </div>
+
+    <div class="page-footer">
+      <span>Future-Ready Transformation System · {{brandCompany}}</span>
+      <span>Page 6 of 6 · {{formatDate}}</span>
+      <span>Confidential · {{clientName}} · FRTS-{{submissionId}}</span>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>`;
+
+// Compile template once at module load
+const compiledTemplate = Handlebars.compile(HTML_TEMPLATE);
+
+// ─── MAIN HANDLER ─────────────────────────────────────────────────────────
+module.exports = async function handler(req, res) {
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    return res.status(200).set(CORS_HEADERS).end();
+  }
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+
+  // Method check
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: 'Method not allowed. Use POST.' });
   }
 
-  // ── Auth ─────────────────────────────────────────────────────────────────
+  // Auth check
   const apiKey = req.headers['x-api-key'];
   if (!apiKey || apiKey !== process.env.FRTS_API_KEY) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: missing or invalid x-api-key.' });
+    return res.status(401).json({ success: false, error: 'Unauthorized: missing or invalid x-api-key header.' });
   }
 
-  // ── Parse body ───────────────────────────────────────────────────────────
+  // Parse body
   let body = {};
   try {
     body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
@@ -244,545 +857,151 @@ res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
     return res.status(400).json({ success: false, error: 'Invalid JSON body.' });
   }
 
-  // ── Extract all fields ───────────────────────────────────────────────────
-  const clientName    = clean(body.name    || body.Name    || body.respondent_name, 'Assessment Participant');
-  const clientCompany = clean(body.company || body.Company || body.company_name,    'Your Organization');
-  const clientTitle   = clean(body.title   || body.Title,   '');
-  const clientEmail   = clean(body.email   || body.Email,   '');
-  const clientPhone   = clean(body.phone   || body.Phone,   '');
-  const industry      = clean(body.industry|| body.Industry,'General Business');
-
-  const frs  = num(body.FutureReadyScore          || body.total_score, 0);
-  const iss  = num(body.IndustryStabilityScore,     0);
-  const tier = clean(body.Tier || tierFromScore(frs));
+  // ── Extract & sanitize template data ────────────────────────────────────
+  const frs = Number(body.FutureReadyScore) || 0;
+  const iss = Number(body.IndustryStabilityScore) || 0;
+  const tier = body.Tier || getTierLabel(frs);
   const tierCfg = TIER_CONFIG[tier] || TIER_CONFIG['Developing'];
 
-  const domScores = {
-    Domain_Leadership:           num(body.Domain_Leadership,           0),
-    Domain_OperationalStability: num(body.Domain_OperationalStability, 0),
-    Domain_CognitiveDiversity:   num(body.Domain_CognitiveDiversity,   0),
-    Domain_TechAI:               num(body.Domain_TechAI,               0),
-    Domain_Momentum:             num(body.Domain_Momentum,             0),
-  };
-
-  const strength1   = clean(body.Strength1,   '');
-  const strength2   = clean(body.Strength2,   '');
-  const strength3   = clean(body.Strength3,   '');
-  const bottleneck1 = clean(body.Bottleneck1, '');
-  const bottleneck2 = clean(body.Bottleneck2, '');
-  const bottleneck3 = clean(body.Bottleneck3, '');
-
-  const execSummary   = clean(body.Narrative_ExecutiveSummary, 'Executive summary not available.');
-  const domainBreak   = clean(body.Narrative_DomainBreakdown,  '');
-  const industryText  = clean(body.IndustryInsights,           '');
-  const aiText        = clean(body.AIReadinessSummary,         '');
-  const roadmap1      = clean(body.Roadmap_Day1_3,             '');
-  const roadmap2      = clean(body.Roadmap_Day4_5,             '');
-  const roadmap3      = clean(body.Roadmap_Day6_7,             '');
-  const plan30        = clean(body.Facilitator_30DayPlan,       '');
-
-  const reportDate = new Date().toLocaleDateString('en-US',
-    { year: 'numeric', month: 'long', day: 'numeric' });
-  const shortId = Math.random().toString(36).slice(2, 10).toUpperCase();
-
-  // ── Build PDF ────────────────────────────────────────────────────────────
-  const PAGE_W = 612;
-  const PAGE_H = 792;
-  const MAR    = 52;
-  const INNER  = PAGE_W - MAR * 2;  // 508
-
-  const doc = new PDFDocument({
-    size:    [PAGE_W, PAGE_H],
-    margins: { top: MAR, bottom: MAR, left: MAR, right: MAR },
-    info: {
-      Title:   `Future-Ready Assessment — ${clientCompany}`,
-      Author:  'SME Media Group, LLC',
-      Subject: 'Future-Ready Transformation Score Report',
-      Creator: 'FRTS v1.1.1',
-    },
-    autoFirstPage: false,
-  });
-
-  const chunks = [];
-  doc.on('data', c => chunks.push(c));
-
-  await new Promise((resolve, reject) => {
-    doc.on('end',   resolve);
-    doc.on('error', reject);
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 1 — COVER
-    // ══════════════════════════════════════════════════════════════════════
-    doc.addPage();
-    let y = 0;
-
-    // Full navy header block
-    drawRect(doc, 0, 0, PAGE_W, 200, C.navy);
-    // Gold top bar
-    drawRect(doc, 0, 0, PAGE_W, 5, C.gold);
-
-    // Brand name
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(C.gold)
-       .text('SME MEDIA GROUP, LLC', MAR, 22, { characterSpacing: 2, lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor([160, 180, 200])
-       .text('Future-Ready Transformation System', MAR, 38, { lineBreak: false });
-
-    // Confidential badge
-    doc.roundedRect(PAGE_W - MAR - 120, 22, 120, 22, 4).fill([50, 70, 100]);
-    doc.font('Helvetica-Bold').fontSize(8).fillColor([180, 200, 220])
-       .text('CONFIDENTIAL', PAGE_W - MAR - 110, 28, { lineBreak: false });
-
-    // Main title
-    doc.font('Helvetica-Bold').fontSize(32).fillColor(C.white)
-       .text('Future-Ready', MAR, 68, { lineBreak: false });
-    doc.font('Helvetica').fontSize(32).fillColor(C.gold)
-       .text('  Assessment', MAR + doc.widthOfString('Future-Ready', { fontSize: 32 }) + 2, 68, { lineBreak: false });
-
-    doc.font('Helvetica').fontSize(13).fillColor([180, 200, 220])
-       .text('Workplace Transformation Score Report', MAR, 108, { lineBreak: false });
-
-    // Gold divider
-    drawRect(doc, MAR, 130, INNER, 2, C.gold);
-
-    // Client info in header
-    doc.font('Helvetica-Bold').fontSize(18).fillColor(C.white)
-       .text(clientCompany, MAR, 142, { width: INNER - 110, lineBreak: false });
-    if (clientTitle) {
-      doc.font('Helvetica').fontSize(10).fillColor([160, 180, 200])
-         .text(`${clientName}  ·  ${clientTitle}`, MAR, 167, { lineBreak: false });
-    } else {
-      doc.font('Helvetica').fontSize(10).fillColor([160, 180, 200])
-         .text(clientName, MAR, 167, { lineBreak: false });
-    }
-
-    y = 215;
-
-    // Score + Tier block
-    // Left: score circle area
-    const CIRCLE_X = MAR + 50;
-    const CIRCLE_Y = y + 50;
-    scoreCircle(doc, CIRCLE_X, CIRCLE_Y, frs, 46);
-
-    // Tier badge next to circle
-    drawRect(doc, MAR + 120, y + 30, 180, 40, tierCfg.color, 6);
-    doc.font('Helvetica-Bold').fontSize(20).fillColor(C.white)
-       .text(tier, MAR + 120, y + 40, { width: 180, align: 'center', lineBreak: false });
-
-    // ISS block
-    doc.font('Helvetica').fontSize(9).fillColor(C.muted)
-       .text('STABILITY SCORE', MAR + 320, y + 28, { lineBreak: false });
-    doc.font('Helvetica-Bold').fontSize(28).fillColor(C.navy)
-       .text(String(num(iss)), MAR + 320, y + 40, { lineBreak: false });
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('/ 100', MAR + 320 + doc.widthOfString(String(num(iss)), { fontSize: 28 }) + 3, y + 52, { lineBreak: false });
-
-    y += 115;
-    drawHR(doc, y, MAR, PAGE_W - MAR, C.border);
-    y += 14;
-
-    // ── Domain mini-bars on cover ──────────────────────────────────────────
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(C.navy)
-       .text('Domain Overview', MAR, y);
-    y += 18;
-
-    const MINI_BAR_W = INNER - 50;
-    for (const d of DOMAINS) {
-      const score = domScores[d.key];
-      const color = domainColor(score);
-      const pct   = Math.min(Math.max(score, 0), 100) / 100;
-
-      doc.font('Helvetica').fontSize(9).fillColor(C.dark)
-         .text(d.label, MAR, y, { width: 185, lineBreak: false });
-      doc.roundedRect(MAR + 190, y + 1, MINI_BAR_W - 140, 8, 2).fill(C.border);
-      if (pct > 0) doc.roundedRect(MAR + 190, y + 1, (MINI_BAR_W - 140) * pct, 8, 2).fill(color);
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(color)
-         .text(`${score}`, PAGE_W - MAR - 30, y, { lineBreak: false });
-      y += 18;
-    }
-
-    y += 10;
-    drawHR(doc, y, MAR, PAGE_W - MAR, C.border);
-    y += 14;
-
-    // Strengths & bottlenecks on cover
-    if (strength1 || bottleneck1) {
-      const col2x = MAR + INNER / 2 + 10;
-      const colW  = INNER / 2 - 16;
-
-      if (strength1) {
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.green)
-           .text('▲ TOP STRENGTHS', MAR, y);
-        let sy = y + 14;
-        [strength1, strength2, strength3].filter(Boolean).forEach(s => {
-          sy = bullet(doc, s, MAR, sy, colW, C.green);
-        });
-      }
-
-      if (bottleneck1) {
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(C.red)
-           .text('▼ PRIORITY GAPS', col2x, y);
-        let by = y + 14;
-        [bottleneck1, bottleneck2, bottleneck3].filter(Boolean).forEach(b => {
-          by = bullet(doc, b, col2x, by, colW, C.red);
-        });
-      }
-    }
-
-    // Cover footer
-    drawRect(doc, 0, PAGE_H - 38, PAGE_W, 38, C.navy);
-    doc.font('Helvetica').fontSize(8).fillColor([160, 180, 200])
-       .text(
-         `Prepared by SME Media Group, LLC  ·  ${reportDate}  ·  Report ID: FRTS-${shortId}`,
-         MAR, PAGE_H - 24, { width: INNER, align: 'center', lineBreak: false }
-       );
-
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 2 — EXECUTIVE SUMMARY
-    // ══════════════════════════════════════════════════════════════════════
-    doc.addPage();
-    y = sectionBanner(doc, MAR, MAR, INNER, 'Section 01', 'Executive Summary', 2);
-
-    // Score widget row
-    const W3 = (INNER - 20) / 3;
-    // Box 1: FRS
-    drawRect(doc, MAR, y, W3, 68, C.light, 6);
-    doc.roundedRect(MAR, y, W3, 68, 6).lineWidth(1).strokeColor(C.border).stroke();
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('FUTURE-READY SCORE', MAR + 8, y + 10, { lineBreak: false });
-    doc.font('Helvetica-Bold').fontSize(32).fillColor(tierCfg.color)
-       .text(String(frs), MAR + 8, y + 24, { lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor(C.muted).text('/ 100', MAR + 8 + doc.widthOfString(String(frs), {fontSize:32}) + 3, y + 38, { lineBreak: false });
-
-    // Box 2: Tier
-    const B2X = MAR + W3 + 10;
-    drawRect(doc, B2X, y, W3, 68, tierCfg.color, 6);
-    doc.font('Helvetica').fontSize(8).fillColor(C.white)
-       .text('PERFORMANCE TIER', B2X + 8, y + 10, { lineBreak: false });
-    doc.font('Helvetica-Bold').fontSize(22).fillColor(C.white)
-       .text(tier, B2X + 8, y + 26, { lineBreak: false });
-
-    // Box 3: ISS
-    const B3X = MAR + (W3 + 10) * 2;
-    drawRect(doc, B3X, y, W3, 68, C.light, 6);
-    doc.roundedRect(B3X, y, W3, 68, 6).lineWidth(1).strokeColor(C.border).stroke();
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('STABILITY SCORE', B3X + 8, y + 10, { lineBreak: false });
-    doc.font('Helvetica-Bold').fontSize(32).fillColor(C.navy)
-       .text(String(num(iss)), B3X + 8, y + 24, { lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor(C.muted).text('/ 100', B3X + 8 + doc.widthOfString(String(num(iss)), {fontSize:32}) + 3, y + 38, { lineBreak: false });
-
-    y += 82;
-
-    // Executive summary narrative
-    doc.roundedRect(MAR, y, INNER, 8).fill(C.navy); // section title bar
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(C.white)
-       .text('  Executive Assessment', MAR, y + 1, { lineBreak: false });
-    y += 20;
-
-    // Render narrative in paragraphs
-    const execParas = execSummary.split(/\n\n+/);
-    for (const para of execParas) {
-      if (!para.trim()) continue;
-      const paraText = para.replace(/\n/g, ' ').trim();
-      doc.font('Helvetica').fontSize(9.5).fillColor(C.dark)
-         .text(paraText, MAR, y, { width: INNER, lineBreak: true, align: 'justify' });
-      y = doc.y + 8;
-      if (y > PAGE_H - 80) break;
-    }
-
-    // Page footer
-    drawHR(doc, PAGE_H - 46, MAR, PAGE_W - MAR, C.border);
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('Future-Ready Transformation System  ·  SME Media Group, LLC', MAR, PAGE_H - 36, { lineBreak: false })
-       .text(`${clientName}  ·  ${clientCompany}  ·  FRTS-${shortId}`, PAGE_W - MAR - 220, PAGE_H - 36, { lineBreak: false });
-
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 3 — DOMAIN BREAKDOWN + SPIKY PROFILE
-    // ══════════════════════════════════════════════════════════════════════
-    doc.addPage();
-    y = sectionBanner(doc, MAR, MAR, INNER, 'Section 02', 'Domain Analysis & Spiky Profile', 3);
-
-    // Domain bars
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(C.navy)
-       .text('Performance by Domain', MAR, y);
-    y += 14;
-
-    const BAR_W = INNER - 50;
-    for (const d of DOMAINS) {
-      y = domainBar(doc, MAR, y, d.label, domScores[d.key], d.weight, BAR_W);
-    }
-
-    y += 8;
-    drawHR(doc, y, MAR, PAGE_W - MAR, C.border);
-    y += 14;
-
-    // Domain breakdown narrative
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(C.navy)
-       .text('Domain Detail', MAR, y);
-    y += 14;
-
-    const domainLines = domainBreak ? domainBreak.split('\n') : [];
-    for (const line of domainLines) {
-      if (y > PAGE_H - 80) break;
-      if (line.startsWith('■')) {
-        // Domain header line
-        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.navy)
-           .text(line, MAR, y, { width: INNER, lineBreak: false });
-        y += 14;
-      } else if (line.trim()) {
-        doc.font('Helvetica').fontSize(9).fillColor(C.dark)
-           .text(line, MAR, y, { width: INNER, lineBreak: true });
-        y = doc.y + 8;
-      }
-    }
-
-    // Page footer
-    drawHR(doc, PAGE_H - 46, MAR, PAGE_W - MAR, C.border);
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('Future-Ready Transformation System  ·  SME Media Group, LLC', MAR, PAGE_H - 36, { lineBreak: false })
-       .text(`${clientName}  ·  ${clientCompany}  ·  FRTS-${shortId}`, PAGE_W - MAR - 220, PAGE_H - 36, { lineBreak: false });
-
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 4 — INDUSTRY INSIGHTS + AI READINESS + 7-DAY ROADMAP
-    // ══════════════════════════════════════════════════════════════════════
-    doc.addPage();
-    y = sectionBanner(doc, MAR, MAR, INNER, 'Section 03', 'Industry Insights, AI Readiness & 7-Day Roadmap', 4);
-
-    // Two-column: Industry | AI Readiness
-    const HALF = (INNER - 16) / 2;
-
-    // Industry insights
-    drawRect(doc, MAR, y, HALF, 14, C.navy, 3);
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.white)
-       .text('  Industry Context', MAR, y + 3, { lineBreak: false });
-    y += 18;
-    const industryLines = industryText.split('\n');
-    let yLeft = y;
-    for (const line of industryLines.slice(0, 18)) {
-      if (yLeft > y + 180) break;
-      doc.font('Helvetica').fontSize(8.5).fillColor(C.dark)
-         .text(line || ' ', MAR, yLeft, { width: HALF - 4, lineBreak: false });
-      yLeft += doc.heightOfString(line || ' ', { width: HALF - 4 }) + 3;
-    }
-
-    // AI readiness
-    const AI_X = MAR + HALF + 16;
-    drawRect(doc, AI_X, y - 18, HALF, 14, C.blue, 3);
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.white)
-       .text('  AI Readiness', AI_X, y - 15, { lineBreak: false });
-    let yRight = y;
-    const aiLines = aiText.split('\n');
-    for (const line of aiLines.slice(0, 18)) {
-      if (yRight > y + 180) break;
-      doc.font('Helvetica').fontSize(8.5).fillColor(C.dark)
-         .text(line || ' ', AI_X, yRight, { width: HALF - 4, lineBreak: false });
-      yRight += doc.heightOfString(line || ' ', { width: HALF - 4 }) + 3;
-    }
-
-    y = Math.max(yLeft, yRight) + 16;
-    drawHR(doc, y, MAR, PAGE_W - MAR, C.border);
-    y += 14;
-
-    // 7-Day Roadmap
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(C.navy)
-       .text('7-Day Fix-First Roadmap', MAR, y);
-    y += 16;
-
-    const CARD_W = (INNER - 16) / 3;
-    const CARDS = [
-      { label: 'DAYS 1–3', title: 'Critical Priority', text: roadmap1, color: C.red },
-      { label: 'DAYS 4–5', title: 'Structural Fix',    text: roadmap2, color: C.amber },
-      { label: 'DAYS 6–7', title: 'Lock & Plan',       text: roadmap3, color: C.green },
-    ];
-
-    const CARD_TOP = y;
-    CARDS.forEach((card, i) => {
-      const cx2 = MAR + i * (CARD_W + 8);
-      drawRect(doc, cx2, CARD_TOP, CARD_W, 16, card.color, 4);
-      doc.font('Helvetica-Bold').fontSize(8).fillColor(C.white)
-         .text(`${card.label} · ${card.title}`, cx2 + 6, CARD_TOP + 4, { lineBreak: false });
-
-      drawRect(doc, cx2, CARD_TOP + 16, CARD_W, 130, C.light, 0);
-      doc.roundedRect(cx2, CARD_TOP, CARD_W, 146, 4).lineWidth(0.5).strokeColor(C.border).stroke();
-
-      const cardLines = (card.text || '').split('\n');
-      let cy3 = CARD_TOP + 22;
-      for (const line of cardLines.slice(0, 10)) {
-        if (cy3 > CARD_TOP + 140) break;
-        doc.font('Helvetica').fontSize(8).fillColor(C.dark)
-           .text(line || ' ', cx2 + 6, cy3, { width: CARD_W - 12, lineBreak: false });
-        cy3 += doc.heightOfString(line || ' ', { width: CARD_W - 12 }) + 3;
-      }
-    });
-
-    // Page footer
-    drawHR(doc, PAGE_H - 46, MAR, PAGE_W - MAR, C.border);
-    doc.font('Helvetica').fontSize(8).fillColor(C.muted)
-       .text('Future-Ready Transformation System  ·  SME Media Group, LLC', MAR, PAGE_H - 36, { lineBreak: false })
-       .text(`${clientName}  ·  ${clientCompany}  ·  FRTS-${shortId}`, PAGE_W - MAR - 220, PAGE_H - 36, { lineBreak: false });
-
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 5 — 30-DAY PLAN + NEXT STEPS CTA
-    // ══════════════════════════════════════════════════════════════════════
-    doc.addPage();
-    y = sectionBanner(doc, MAR, MAR, INNER, 'Section 04', '30-Day Strategic Roadmap & Next Steps', 5);
-
-    // 30-day plan
-    const planParas = plan30 ? plan30.split(/\n\n+/) : [];
-    for (const para of planParas) {
-      if (y > PAGE_H - 200) break;
-      const text = para.trim();
-      if (!text) continue;
-
-      if (text.startsWith('WEEK') || text.startsWith('30-DAY')) {
-        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.navy)
-           .text(text.split('\n')[0], MAR, y, { lineBreak: false });
-        y += 13;
-        const rest = text.split('\n').slice(1).join('\n').trim();
-        if (rest) {
-          doc.font('Helvetica').fontSize(9).fillColor(C.dark)
-             .text(rest, MAR, y, { width: INNER, lineBreak: true });
-          y = doc.y + 8;
-        }
-      } else {
-        doc.font('Helvetica').fontSize(9).fillColor(C.dark)
-           .text(text, MAR, y, { width: INNER, lineBreak: true });
-        y = doc.y + 8;
-      }
-    }
-
-    y += 10;
-
-    // CTA block
-    const CTA_H = PAGE_H - y - 52;
-    drawRect(doc, MAR, y, INNER, Math.max(CTA_H, 100), C.navy, 8);
-    // Gold accent
-    drawRect(doc, MAR, y, INNER, 4, C.gold, 4);
-
-    doc.font('Helvetica-Bold').fontSize(17).fillColor(C.white)
-       .text('Your Transformation Starts Now', MAR + 20, y + 18, { width: INNER - 40, align: 'center', lineBreak: false });
-    doc.font('Helvetica').fontSize(9.5).fillColor([160, 180, 210])
-       .text('You\'ve completed the assessment. Here\'s what happens next.', MAR + 20, y + 40, { width: INNER - 40, align: 'center', lineBreak: false });
-
-    const STEPS_Y = y + 58;
-    const STEPS = ['Book Strategy Debrief', 'Execute 7-Day Roadmap', 'Launch 30-Day Plan', '90-Day Re-Assessment'];
-    const SW = (INNER - 60) / 4;
-    STEPS.forEach((step, i) => {
-      const sx = MAR + 30 + i * (SW + 10);
-      drawRect(doc, sx, STEPS_Y, SW, 48, [50, 75, 115], 6);
-      doc.font('Helvetica-Bold').fontSize(18).fillColor(C.gold)
-         .text(String(i + 1), sx, STEPS_Y + 4, { width: SW, align: 'center', lineBreak: false });
-      doc.font('Helvetica').fontSize(7.5).fillColor(C.white)
-         .text(step, sx + 4, STEPS_Y + 28, { width: SW - 8, align: 'center', lineBreak: false });
-    });
-
-    doc.font('Helvetica-Bold').fontSize(10).fillColor(C.gold)
-       .text('SME Media Group, LLC  ·  smemediagroup.com',
-             MAR + 20, STEPS_Y + 58, { width: INNER - 40, align: 'center', lineBreak: false });
-
-    // Final footer
-    drawRect(doc, 0, PAGE_H - 38, PAGE_W, 38, C.navy);
-    doc.font('Helvetica').fontSize(7.5).fillColor([120, 140, 160])
-       .text(
-         `© ${new Date().getFullYear()} SME Media Group, LLC  ·  Future-Ready Transformation System™  ·  Confidential  ·  Report FRTS-${shortId}`,
-         MAR, PAGE_H - 24, { width: INNER, align: 'center', lineBreak: false }
-       );
-
-    doc.end();
-  });
-
-    // ── Build response ───────────────────────────────────────────────────────
-  const pdfBuffer = Buffer.concat(chunks);
-  const safeName  = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-');
-  const filename  = `FRTS-Report-${safeName}-${shortId}.pdf`;
-
-// ─── GOOGLE DRIVE UPLOAD (optional, requires GOOGLE_SA_KEY env var) ──────
-let driveUrl = null;
-let driveFileId = null;
-
-if (process.env.GOOGLE_SA_KEY && process.env.GOOGLE_DRIVE_FOLDER_ID) {
+  // White-label / branding overrides
+  const accentColor  = body.branding_accent_color  || '#1E3A5F';
+  const logoUrl      = body.branding_logo_url       || '';
+  const brandCompany = body.branding_company_name   || 'SME Media Group, LLC';
+  const brandFooter  = body.branding_footer_text    || 'Clarksville, TN · smemediagroup.com';
+
+  // Submission ID — use provided or generate short one
+  const submissionId = (body.submission_id || body.SubmissionId || generateShortId()).toUpperCase().slice(0, 8);
+
+  // Client info
+  const clientName    = clean(body.name    || body.Name    || 'Assessment Participant');
+  const clientCompany = clean(body.company || body.Company || '');
+  const clientTitle   = clean(body.title   || body.Title   || '');
+  const industry      = clean(body.industry || body.Industry || 'General Business');
+
+  // Domain scores
+  const domLeadership = Number(body.Domain_Leadership          || body.M1) || 0;
+  const domOperations = Number(body.Domain_OperationalStability || body.M2) || 0;
+  const domWorkforce  = Number(body.Domain_WorkforceFinancial   || body.M3) || 0;  // Bug #14 FIX: renamed from Domain_CognitiveDiversity
+  const domTech       = Number(body.Domain_TechAI               || body.M4) || 0;
+  const domMomentum   = Number(body.Domain_Momentum             || body.M5) || 0;
+
+  // Strengths / bottlenecks
+  const strength1   = clean(body.Strength1   || '');
+  const strength2   = clean(body.Strength2   || '');
+  const strength3   = clean(body.Strength3   || '');
+  const bottleneck1 = clean(body.Bottleneck1 || '');
+  const bottleneck2 = clean(body.Bottleneck2 || '');
+  const bottleneck3 = clean(body.Bottleneck3 || '');
+
+  // Narratives
+  const executiveSummary = clean(body.Narrative_ExecutiveSummary || 'Assessment complete. See domain scores above.');
+  const domainBreakdown  = clean(body.Narrative_DomainBreakdown  || '');
+  const industryInsights = clean(body.IndustryInsights           || '');
+  const aiReadiness      = clean(body.AIReadinessSummary         || '');
+
+  // Roadmap
+  const roadmapDay1_3 = clean(body.Roadmap_Day1_3 || '');
+  const roadmapDay4_5 = clean(body.Roadmap_Day4_5 || '');
+  const roadmapDay6_7 = clean(body.Roadmap_Day6_7 || '');
+  const thirtyDayPlan = clean(body.Facilitator_30DayPlan || '');
+
+  // ── Build HTML ───────────────────────────────────────────────────────────
+  let html;
   try {
-    const { google } = require('googleapis');
-    const { Readable } = require('stream');
-
-    const credentials = JSON.parse(process.env.GOOGLE_SA_KEY);
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: ['https://www.googleapis.com/auth/drive.file']
+    html = compiledTemplate({
+      // Client
+      clientName, clientCompany, clientTitle, industry,
+      // Scores
+      frs, iss, tier, tierColor: tierCfg.color,
+      // Domains
+      domLeadership, domOperations, domWorkforce, domTech, domMomentum,
+      // Tags
+      strength1, strength2, strength3,
+      bottleneck1, bottleneck2, bottleneck3,
+      // Narratives
+      executiveSummary, domainBreakdown, industryInsights, aiReadiness,
+      // Roadmap
+      roadmapDay1_3, roadmapDay4_5, roadmapDay6_7, thirtyDayPlan,
+      // Branding
+      accentColor, logoUrl, brandCompany, brandFooter,
+      // Meta
+      submissionId
     });
-
-    const drive = google.drive({ version: 'v3', auth });
-    const stream = Readable.from(pdfBuffer);
-
-    const driveRes = await drive.files.create({
-      requestBody: {
-        name: filename,
-        parents: [process.env.GOOGLE_DRIVE_FOLDER_ID],
-        mimeType: 'application/pdf'
-      },
-      media: { mimeType: 'application/pdf', body: stream }
-    });
-
-    driveFileId = driveRes.data.id;
-
-    // Make file readable by anyone with the link
-    await drive.permissions.create({
-      fileId: driveFileId,
-      requestBody: { role: 'reader', type: 'anyone' }
-    });
-
-    driveUrl = `https://drive.google.com/file/d/${driveFileId}/view`;
-  } catch (driveErr) {
-    console.error('[FRTS PDF] Drive upload failed (non-fatal):', driveErr.message);
+  } catch (templateErr) {
+    console.error('[FRTS PDF] Template error:', templateErr);
+    return res.status(500).json({ success: false, error: 'Template render failed.', details: templateErr.message });
   }
-}
 
-// Then in the return, add these fields:
-return res.status(200).json({
-  success: true,
-  pdf_base64,
-  drive_url: driveUrl,        // ← Zapier can use this for email link
-  drive_file_id: driveFileId,
-  filename,
-  size_kb: sizeKb,
-  page_count: 6,
-  duration_ms: Date.now() - startTime,
-  client: { name: clientName, company: clientCompany, email: body.email || '' },
-  score: { frs, iss, tier }
-});
+  // ── Launch Puppeteer ─────────────────────────────────────────────────────
+  let browser;
+  const startTime = Date.now();
 
-  // Upload to Vercel Blob Storage and return a public URL
-  let blobUrl;
   try {
-    const blob = await put(
-      `reports/${filename}`,
-      pdfBuffer,
-      { contentType: 'application/pdf', access: 'public' }
-    );
-    blobUrl = blob.url;
-  } catch (blobErr) {
-    console.error('Blob upload failed:', blobErr);
+    browser = await puppeteer.launch({
+      args:            chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath:  await chromium.executablePath(),
+      headless:        chromium.headless,
+      ignoreHTTPSErrors: true
+    });
+
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 15000 });
+
+    const pdfBuffer = await page.pdf({
+      format:            'A4',
+      printBackground:   true,
+      margin:            { top: '0', right: '0', bottom: '0', left: '0' },
+      preferCSSPageSize: false
+    });
+
+    await browser.close();
+    browser = null;
+
+    const durationMs  = Date.now() - startTime;
+    const pdf_base64  = pdfBuffer.toString('base64');
+    const sizeKb      = Math.round(pdfBuffer.length / 1024);
+    const safeCompany = (clientCompany || clientName).replace(/[^a-zA-Z0-9\-_]/g, '-').substring(0, 40);
+    const filename    = `FRTS-${safeCompany}-Score${frs}-${submissionId}.pdf`;
+
+    console.log(`[FRTS PDF] Generated ${filename} — ${sizeKb}KB in ${durationMs}ms`);
+
+    return res.status(200).json({
+      success:    true,
+      pdf_base64,
+      filename,
+      size_kb:    sizeKb,
+      page_count: 6,
+      duration_ms: durationMs,
+      client: { name: clientName, company: clientCompany, email: body.email || '' },
+      score:  { frs, iss, tier }
+    });
+
+  } catch (puppeteerErr) {
+    console.error('[FRTS PDF] Puppeteer error:', puppeteerErr);
+    if (browser) { try { await browser.close(); } catch (_) {} }
     return res.status(500).json({
       success: false,
-      error: 'PDF generated but blob upload failed.',
-      detail: blobErr.message,
+      error:   'PDF generation failed.',
+      details: puppeteerErr.message
     });
   }
-
-  return res.status(200).json({
-    success:    true,
-    blob_url:   blobUrl,
-    filename,
-    mime_type:  'application/pdf',
-    size_kb:    Math.round(pdfBuffer.length / 1024),
-    page_count: 5,
-    report_id:  shortId,
-    company:    clientCompany,
-    email:      clientEmail,
-    name:       clientName,
-  });
 };
+
+// ─── UTILITIES ────────────────────────────────────────────────────────────
+function getTierLabel(score) {
+  if (score >= 90) return 'Optimized';
+  if (score >= 75) return 'Strong';
+  if (score >= 60) return 'Developing';
+  if (score >= 40) return 'At Risk';
+  return 'Critical';
+}
+
+function clean(str) {
+  if (!str) return '';
+  return String(str).trim();
+}
+
+function generateShortId() {
+  return Math.random().toString(36).substr(2, 8).toUpperCase();
+}

@@ -1,5 +1,5 @@
 // ═════════════════════════════════════════════════════════════════════
-// FUTURE-READY TRANSFORMATION ANALYSIS ENGINE — v1.1.0
+// FUTURE-READY TRANSFORMATION ANALYSIS ENGINE — v1.2.0
 // SME Media Group, LLC | Clarksville, TN
 // Endpoint: POST /api/futureready-analyze
 //
@@ -8,7 +8,13 @@
 //   - Added validation_warnings[] to response (Bug #5)
 //   - Removed body[''] phantom key (Bug #4)
 //   - ISS edge case cap when FRS < 40 (Bug #7)
+// v1.2.0 changes:
+//   - Renamed CognitiveDiversity → WorkforceFinancial domain key (Bug #14)
+//   - Added SubmissionId to response (Bug #15)
+//   - Added FutureReadyTier to response (Bug #16)
 // ═════════════════════════════════════════════════════════════════════
+
+const crypto = require('crypto');
 
 // ─── DOMAIN CONFIGURATION ────────────────────────────────────────────────
 const DOMAINS = [
@@ -55,7 +61,7 @@ const DOMAINS = [
     }
   },
   {
-    key: 'CognitiveDiversity',
+    key: 'WorkforceFinancial',
     label: 'Workforce & Financial Health',
     questions: [9, 10, 11, 12],
     weight: 0.20,
@@ -503,30 +509,36 @@ module.exports = async (req, res) => {
     const plan30             = generate30DayPlan(analysisData);
     const momentumCommentary = generateMomentumCommentary(analysisData);
 
+    const submissionId = `frts-${crypto.randomUUID()}`;
+    const futureReadyTier = getTier(frs).label;
+
     const response = {
       // Status
       AnalysisCompleted: 'Yes',
-      ApiVersion: '1.1.0',
+      ApiVersion: '1.2.0',
+
+      // Bug #15/#16 FIX: expose SubmissionId and FutureReadyTier in response
+      SubmissionId:       submissionId,
+      FutureReadyTier:    futureReadyTier,
 
       // Bug #5 FIX: validation warnings surface to caller
       ValidationWarnings: warnings.length > 0 ? warnings.join(' | ') : 'None',
 
       // Composite scores
-      Tier:                   getTier(frs).label,
       FutureReadyScore:       frs,
       IndustryStabilityScore: iss,
 
       // Domain scores
       Domain_Leadership:           domainScores.Leadership,
       Domain_OperationalStability: domainScores.OperationalStability,
-      Domain_CognitiveDiversity:   domainScores.CognitiveDiversity,
+      Domain_WorkforceFinancial:   domainScores.WorkforceFinancial,
       Domain_TechAI:               domainScores.TechAI,
       Domain_Momentum:             domainScores.Momentum,
 
       // Module scores (mirrors for Zapier Tables compatibility)
       M1: domainScores.Leadership,
       M2: domainScores.OperationalStability,
-      M3: domainScores.CognitiveDiversity,
+      M3: domainScores.WorkforceFinancial,
       M4: domainScores.TechAI,
       M5: domainScores.Momentum,
 
