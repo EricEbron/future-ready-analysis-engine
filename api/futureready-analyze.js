@@ -1,5 +1,5 @@
 // ═════════════════════════════════════════════════════════════════════
-// FUTURE-READY TRANSFORMATION ANALYSIS ENGINE — v1.2.0
+// FUTURE-READY TRANSFORMATION ANALYSIS ENGINE — v1.3.0
 // SME Media Group, LLC | Clarksville, TN
 // Endpoint: POST /api/futureready-analyze
 //
@@ -8,10 +8,13 @@
 //   - Added validation_warnings[] to response (Bug #5)
 //   - Removed body[''] phantom key (Bug #4)
 //   - ISS edge case cap when FRS < 40 (Bug #7)
-// v1.2.0 changes:
-//   - Renamed CognitiveDiversity → WorkforceFinancial domain key (Bug #14)
-//   - Added SubmissionId to response (Bug #15)
+// v1.3.0 changes:
+//   - Renamed CognitiveDiversity → WorkforceFinancial (Bug #14)
+//   - Added SubmissionId via crypto.randomUUID() (Bug #15)
 //   - Added FutureReadyTier to response (Bug #16)
+//   - Restricted CORS to Zapier origins (Bug #10/#12)
+//   - Added PDFPassword generation (v1.3 feature)
+//   - Added DebriefPath routing field (v1.3 feature)
 // ═════════════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -462,13 +465,29 @@ function buildBottleneckNarrative(domainInfo, score) {
 }
 
 
+// ─── PDF PASSWORD + DEBRIEF PATH ──────────────────────────────────────────
+function generatePDFPassword(companyName) {
+  const prefix = (companyName || 'FRTS').replace(/[^a-zA-Z]/g,'').toUpperCase().slice(0,4).padEnd(4,'X');
+  const suffix = String(Math.floor(1000 + Math.random() * 9000));
+  return prefix + suffix;
+}
+function resolveDebriefPath(val) {
+  const v = (val||'').toLowerCase();
+  if (v.includes('book'))                              return 'BookMe';
+  if (v.includes('call'))                              return 'CallMe';
+  if (v.includes('not')||v.includes('later'))          return 'NotRightNow';
+  return 'NotRightNow';
+}
+
 // ═════════════════════════════════════════════════════════════════
 // API HANDLER — v1.1.0 (with x-api-key auth)
 // ═════════════════════════════════════════════════════════════════
 
 module.exports = async (req, res) => {
   // ── CORS headers ─────────────────────────────────────────────────
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const _ao=['https://hooks.zapier.com','https://zapier.com'];
+  const _ro=req.headers['origin']||'';
+  res.setHeader('Access-Control-Allow-Origin',_ao.includes(_ro)?_ro:_ao[0]);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
 
@@ -509,17 +528,20 @@ module.exports = async (req, res) => {
     const plan30             = generate30DayPlan(analysisData);
     const momentumCommentary = generateMomentumCommentary(analysisData);
 
-    const submissionId = `frts-${crypto.randomUUID()}`;
+    const submissionId    = 'FRTS-' + crypto.randomUUID().replace(/-/g,'').slice(0,12).toUpperCase();
     const futureReadyTier = getTier(frs).label;
+    const pdfPassword     = generatePDFPassword(client.company);
+    const debriefPath     = resolveDebriefPath(client.debrief);
 
     const response = {
       // Status
       AnalysisCompleted: 'Yes',
-      ApiVersion: '1.2.0',
+      ApiVersion: '1.3.0',
 
-      // Bug #15/#16 FIX: expose SubmissionId and FutureReadyTier in response
-      SubmissionId:       submissionId,
-      FutureReadyTier:    futureReadyTier,
+      SubmissionId:    submissionId,
+      FutureReadyTier: futureReadyTier,
+      PDFPassword:     pdfPassword,
+      DebriefPath:     debriefPath,
 
       // Bug #5 FIX: validation warnings surface to caller
       ValidationWarnings: warnings.length > 0 ? warnings.join(' | ') : 'None',
