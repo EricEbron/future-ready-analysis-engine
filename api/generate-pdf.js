@@ -525,9 +525,9 @@ module.exports = async function handler(req, res) {
   let blobUrl;
   try {
     const blob = await put(`reports/${filename}`, pdfBuffer, {
-      access: 'public', contentType: 'application/pdf',
+      access: 'private', contentType: 'application/pdf', // Bug fix: store is private-access-only
     });
-    blobUrl = blob.url;
+    blobUrl = blob.downloadUrl || blob.url; // private store returns signed downloadUrl
   } catch (blobErr) {
     console.error('[FRTS PDF] Blob upload failed:', blobErr.message);
     return res.status(500).json({ success: false, error: 'PDF generated but upload failed.', detail: blobErr.message });
