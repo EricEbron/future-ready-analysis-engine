@@ -624,24 +624,25 @@ module.exports = async function handler(req, res) {
     doc.end();
   });
 
-  // ── Return PDF as base64 (Zapier uploads to Google Drive) ─────────────
-  // Vercel Blob removed: store created as private-only; SDK requires public.
-  // Solution: return pdf_base64 → Zapier "Google Drive → Upload File" step
-  // handles storage and returns a Drive file URL for logging.
-  const pdfBuffer  = Buffer.concat(chunks);
-  const safeName   = clientCompany.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').slice(0, 30);
-  const filename   = `FRTS-Report-${safeName}-${shortId}.pdf`;
-  const pdf_base64 = pdfBuffer.toString('base64');
+  import { put } from '@vercel/blob';
 
-  return res.status(200).json({
-    success:       true,
-    pdf_base64,
-    filename,
-    pdf_password:  pdfPassword,
-    debrief_path:  debriefPath,
-    submission_id: submissionId,
-    mime_type:     'application/pdf',
-    size_kb:       Math.round(pdfBuffer.length / 1024),
-    page_count:    TOTAL_PAGES,
-  });
-};
+// === At the bottom of your existing generate-pdf.js, replace the return block ===
+
+// REMOVE this (your current return):
+// return res.status(200).json({ pdf: pdfBase64, filename: filename, ... });
+
+// REPLACE with this:
+const buffer = Buffer.from(pdfBase64, 'base64');
+const blob = await put(filename, buffer, {
+  access: 'public',
+  contentType: 'application/pdf',
+  addRandomSuffix: false,
+});
+
+return res.status(200).json({
+  downloadUrl: blob.url,
+  filename: filename,
+  mimeType: 'application/pdf',
+  password: pdfPassword,
+  submissionId: submissionId,
+});
