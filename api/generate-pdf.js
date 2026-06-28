@@ -625,8 +625,6 @@ module.exports = async function handler(req, res) {
     doc.end();
   });
 
-  import { put } from '@vercel/blob';
-
   const pdfBuffer = Buffer.concat(chunks);
   const filename = `FRTS-Report-${clientCompany.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 20)}-${shortId}.pdf`;
 
