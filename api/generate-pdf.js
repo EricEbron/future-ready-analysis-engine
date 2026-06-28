@@ -20,6 +20,7 @@
 //     submission_id, size_kb, page_count }
 // ═════════════════════════════════════════════════════════════════════
 
+const { put } = require('@vercel/blob');
 'use strict';
 
 const PDFDocument = require('pdfkit');
@@ -626,23 +627,20 @@ module.exports = async function handler(req, res) {
 
   import { put } from '@vercel/blob';
 
-// === At the bottom of your existing generate-pdf.js, replace the return block ===
+  const pdfBuffer = Buffer.concat(chunks);
+  const filename = `FRTS-Report-${clientCompany.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 20)}-${shortId}.pdf`;
 
-// REMOVE this (your current return):
-// return res.status(200).json({ pdf: pdfBase64, filename: filename, ... });
+  const blob = await put(filename, pdfBuffer, {
+    access: 'public',
+    contentType: 'application/pdf',
+    addRandomSuffix: false,
+  });
 
-// REPLACE with this:
-const buffer = Buffer.from(pdfBase64, 'base64');
-const blob = await put(filename, buffer, {
-  access: 'public',
-  contentType: 'application/pdf',
-  addRandomSuffix: false,
-});
-
-return res.status(200).json({
-  downloadUrl: blob.url,
-  filename: filename,
-  mimeType: 'application/pdf',
-  password: pdfPassword,
-  submissionId: submissionId,
-});
+  return res.status(200).json({
+    success: true,
+    downloadUrl: blob.url,
+    filename: filename,
+    pdf_password: pdfPassword,
+    debrief_path: debriefPath,
+    submission_id: submissionId,
+  });
