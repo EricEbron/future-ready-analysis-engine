@@ -631,7 +631,7 @@ module.exports = async function handler(req, res) {
     let blob;
   try {
         blob = await put(filename, pdfBuffer, {
-      access: 'private',
+      access: 'public',
       contentType: 'application/pdf',
       addRandomSuffix: false,
     });
