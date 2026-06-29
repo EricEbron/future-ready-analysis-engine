@@ -634,7 +634,7 @@ module.exports = async function handler(req, res) {
   access: 'public',
   contentType: 'application/pdf',
   addRandomSuffix: false,
-  token: process.env.PDF_BLOB_READ_WRITE_TOKEN,   ← add this line
+  token: process.env.PDF_BLOB_READ_WRITE_TOKEN,
 });
   } catch (blobErr) {
     return res.status(500).json({
