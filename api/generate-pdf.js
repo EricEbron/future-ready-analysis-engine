@@ -630,8 +630,8 @@ module.exports = async function handler(req, res) {
 
     let blob;
   try {
-    blob = await put(filename, pdfBuffer, {
-      access: 'public',
+        blob = await put(filename, pdfBuffer, {
+      access: 'private',
       contentType: 'application/pdf',
       addRandomSuffix: false,
     });
@@ -645,7 +645,7 @@ module.exports = async function handler(req, res) {
 
   return res.status(200).json({
     success:       true,
-    downloadUrl:   blob.url,
+    downloadUrl:   blob.downloadUrl,
     filename:      filename,
     pdf_password:  pdfPassword,
     debrief_path:  debriefPath,
