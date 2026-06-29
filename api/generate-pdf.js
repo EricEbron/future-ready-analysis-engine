@@ -642,3 +642,4 @@ module.exports = async function handler(req, res) {
     debrief_path: debriefPath,
     submission_id: submissionId,
   });
+  };
