@@ -631,10 +631,11 @@ module.exports = async function handler(req, res) {
     let blob;
   try {
         blob = await put(filename, pdfBuffer, {
-      access: 'public',
-      contentType: 'application/pdf',
-      addRandomSuffix: false,
-    });
+  access: 'public',
+  contentType: 'application/pdf',
+  addRandomSuffix: false,
+  token: process.env.PDF_BLOB_READ_WRITE_TOKEN,   ← add this line
+});
   } catch (blobErr) {
     return res.status(500).json({
       success: false,
