@@ -645,7 +645,7 @@ module.exports = async function handler(req, res) {
 
   return res.status(200).json({
     success:       true,
-    downloadUrl:   blob.downloadUrl,
+    downloadUrl:   blob.url,
     filename:      filename,
     pdf_password:  pdfPassword,
     debrief_path:  debriefPath,
