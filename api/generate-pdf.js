@@ -628,18 +628,28 @@ module.exports = async function handler(req, res) {
   const pdfBuffer = Buffer.concat(chunks);
   const filename = `FRTS-Report-${clientCompany.replace(/\s+/g, '-').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 20)}-${shortId}.pdf`;
 
-  const blob = await put(filename, pdfBuffer, {
-    access: 'public',
-    contentType: 'application/pdf',
-    addRandomSuffix: false,
-  });
+    let blob;
+  try {
+    blob = await put(filename, pdfBuffer, {
+      access: 'public',
+      contentType: 'application/pdf',
+      addRandomSuffix: false,
+    });
+  } catch (blobErr) {
+    return res.status(500).json({
+      success: false,
+      error: 'Blob upload failed',
+      detail: blobErr.message || String(blobErr),
+    });
+  }
 
   return res.status(200).json({
-    success: true,
-    downloadUrl: blob.url,
-    filename: filename,
-    pdf_password: pdfPassword,
-    debrief_path: debriefPath,
+    success:       true,
+    downloadUrl:   blob.url,
+    filename:      filename,
+    pdf_password:  pdfPassword,
+    debrief_path:  debriefPath,
     submission_id: submissionId,
   });
+
   };
