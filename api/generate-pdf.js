@@ -645,12 +645,12 @@ module.exports = async function handler(req, res) {
   }
 
   return res.status(200).json({
-    success:       true,
-    downloadUrl:   blob.url,
-    filename:      filename,
-    pdf_password:  pdfPassword,
-    debrief_path:  debriefPath,
-    submission_id: submissionId,
-  });
-
-  };
+  success: true,
+  downloadUrl: blob.url,
+  filename: filename,
+  filenameBase: filename.replace(/\.pdf$/, ''),   // ← ADD THIS LINE
+  pdf_password: pdfPassword,
+  debrief_path: debriefPath,
+  submission_id: submissionId,
+});
+};
